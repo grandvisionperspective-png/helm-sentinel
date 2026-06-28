@@ -1,0 +1,74 @@
+name: helm-watchdog
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Send a test alert regardless of VPS state'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Manual test alert
+        if: ${{ inputs.test }}
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_JOBS_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "text=Steve Jobs: external watchdog test. GitHub reaches you even if the VPS is dark. Live now, checking the box every 5 minutes." >/dev/null
+
+      - name: Check VPS reachability
+        id: check
+        run: |
+          status=DOWN
+          for i in 1 2 3; do
+            if timeout 10 bash -c "cat < /dev/null > /dev/tcp/77.42.37.42/443" 2>/dev/null; then
+              status=UP; break
+            fi
+            sleep 15
+          done
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "VPS status: $status"
+
+      - name: Compare state and alert on change
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_JOBS_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          new="${{ steps.check.outputs.status }}"
+          last=UP
+          [ -f state.txt ] && last="$(tr -d '[:space:]' < state.txt)"
+          send() {
+            curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_CHAT}" \
+              --data-urlencode "text=$1" >/dev/null
+          }
+          if [ "$new" = "DOWN" ] && [ "$last" = "UP" ]; then
+            send "Steve Jobs: HELM is UNREACHABLE. The VPS (77.42.37.42) did not answer on port 443 across 3 checks over about 45 seconds. This is the off-box watchdog on GitHub, so it fires even when the box is dark. I will message you the moment it recovers."
+          elif [ "$new" = "UP" ] && [ "$last" = "DOWN" ]; then
+            send "Steve Jobs: HELM is BACK. The VPS is reachable again on port 443."
+          fi
+          if [ "$new" != "$last" ]; then
+            echo "$new" > state.txt
+            git config user.name "helm-sentinel"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add state.txt
+            git commit -m "watchdog: $last -> $new [skip ci]" || true
+            git push || true
+          fi
