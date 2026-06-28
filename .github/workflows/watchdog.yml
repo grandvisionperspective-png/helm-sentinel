@@ -48,7 +48,7 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "VPS status: $status"
 
-      - name: Compare state and alert on change
+      - name: Alert on change and daily keepalive
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_JOBS_TOKEN }}
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -66,11 +66,16 @@ jobs:
           elif [ "$new" = "UP" ] && [ "$last" = "DOWN" ]; then
             send "Steve Jobs: HELM is BACK. The VPS is reachable again on port 443."
           fi
-          if [ "$new" != "$last" ]; then
-            echo "$new" > state.txt
+          changed=0
+          if [ "$new" != "$last" ]; then echo "$new" > state.txt; changed=1; fi
+          today="$(date -u +%F)"
+          lastday=""
+          [ -f last_check.txt ] && lastday="$(cat last_check.txt)"
+          if [ "$today" != "$lastday" ]; then echo "$today" > last_check.txt; changed=1; fi
+          if [ "$changed" = "1" ]; then
             git config user.name "helm-sentinel"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add state.txt
-            git commit -m "watchdog: $last -> $new [skip ci]" || true
+            git add state.txt last_check.txt
+            git commit -m "watchdog ${last}->${new} keepalive ${today} [skip ci]" || true
             git push || true
           fi
